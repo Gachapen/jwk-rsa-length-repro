@@ -1,7 +1,6 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Microsoft.IdentityModel.Tokens;
 
@@ -12,6 +11,24 @@ internal static class Program
     private const int KeyCount = 1000;
     private const int MaxPrintedFailures = 3;
     private const string FixtureFileName = "short-d.jwk.json";
+
+    /// <summary>
+    /// The minimal example from the issue: a spec-compliant 1024-bit key whose d is 127 bytes (its first byte is zero).
+    /// PS256 is used because IdentityModel allows keys smaller than 2048 bits for it, unlike RS256.
+    /// </summary>
+    private const string SnippetJwk = """
+        {
+          "kty": "RSA",
+          "n": "ubQ1Gu7ceiHcuzF8W9qz6j9i5IQLncohSpy9wC42cymPGgDpJYMXo-72LvtnmIPMcknUiG3mimIiFtzS-Tru8QVL4e8vdgn7g6cyN0eAAztsFSCfzgRp6sMrtp1UrzSY-t8PJnRrxQEl87DHp2-qV9sFSHNF9PsF0UErO3dD6U8",
+          "e": "AQAB",
+          "d": "CqoziK-WkmeV6QmMd2LWpgo5ydWKJvKgXlFxFwVPCuEnGtR6uthaG7jpxxqpFFUgyrZMnxFZjiEk-ismzHseIn9bUlInUkBZrhkMNfCV9e0e3aDfSzNzwXNLdZsOz44HL_vtV7XKEbVanZ1ZmJF3jdwIAM5-D9PlyihqC0_50Q",
+          "p": "_oyofsEFaTO6Q_X9KDYdY1iBro8ZvonlO3ris75plu3MhMIEIPqpc44XrGZyxqVOeX1tHNZzKeodK1ANxoYiZw",
+          "q": "usMdtZZiKsJP2PidQfPUCWrtBr5U5Yd9x6VupygHFM4MbWx-ORAuTSv23hPQM_auHYr9R-Dw8U4U7OMlHPFA2Q",
+          "dp": "dx3DS21v5sb6Bwt5p_OK1Q55wQHd_jfxOWBL7ejQ6HvnFMjlvbkOyrBXi6l1VFfO3TNAeBoyUg7oD3iquZfTSQ",
+          "dq": "K1ghSwWN3vKd6XM5vBbEvTLNs-T0exjI_k7MsYq-qftwMu0dFk1FEbAEaWIbzhOQMVcSlV4FTVuby6aj9GWhcQ",
+          "qi": "90Cdh_4zDLm5VTSuI_LRN-PXojEbrmbDLPoRZfycqsqh3DzB_LC8w4-jkN2Qjoeq6gsXkvrK7ZXVllFN1_ebGg"
+        }
+        """;
 
     private static readonly string[] s_privateNames = ["d", "p", "q", "dp", "dq", "qi"];
 
@@ -32,8 +49,9 @@ internal static class Program
             "released" => RunRandomKeys(padded: false),
             "padded" => RunRandomKeys(padded: true),
             "fixture" => RunFixture(),
+            "snippet" => RunSnippet(),
             "find-fixture" => FindFixture(),
-            _ => throw new ArgumentException("Usage: Repro <released | padded | fixture | find-fixture>"),
+            _ => throw new ArgumentException("Usage: Repro <released | padded | fixture | snippet | find-fixture>"),
         };
     }
 
@@ -71,7 +89,7 @@ internal static class Program
 
             try
             {
-                Sign(padded ? new RsaSecurityKey(CreatePaddedRsaParameters(jwk)) { KeyId = jwk.Kid } : jwk);
+                Sign(padded ? new RsaSecurityKey(CreatePaddedRsaParameters(jwk)) { KeyId = jwk.Kid } : jwk, SecurityAlgorithms.RsaSha256);
             }
             catch (Exception ex)
             {
@@ -115,16 +133,25 @@ internal static class Program
     private static int RunFixture()
     {
         var path = Path.Combine(GetFixturesDirectory(), FixtureFileName);
-        Console.WriteLine($"Loading {Path.GetFullPath(path)} through JsonWebKey and signing (released IdentityModel).");
+        Console.WriteLine($"Loading {Path.GetFullPath(path)} through JsonWebKey and signing with RS256 (released IdentityModel).");
+        return SignSingleKey(new JsonWebKey(File.ReadAllText(path)), SecurityAlgorithms.RsaSha256);
+    }
 
-        var jwk = new JsonWebKey(File.ReadAllText(path));
+    private static int RunSnippet()
+    {
+        Console.WriteLine("Loading the 1024-bit JWK from the issue through JsonWebKey and signing with PS256 (released IdentityModel).");
+        return SignSingleKey(new JsonWebKey(SnippetJwk), SecurityAlgorithms.RsaSsaPssSha256);
+    }
+
+    private static int SignSingleKey(JsonWebKey jwk, string algorithm)
+    {
         Console.WriteLine($"Short values: {Describe(ShortValues(jwk))}");
         PrintLengths(jwk);
         Console.WriteLine();
 
         try
         {
-            Sign(jwk);
+            Sign(jwk, algorithm);
             Console.WriteLine("RESULT: PASS (signed)");
             return 0;
         }
@@ -166,10 +193,10 @@ internal static class Program
     /// The application code path. IdentityModel creates the RSA instance (and, for a JsonWebKey, calls
     /// CreateRsaParameters and RSA.ImportParameters) lazily on the first Sign, not in CreateForSigning.
     /// </summary>
-    private static void Sign(SecurityKey key) =>
+    private static void Sign(SecurityKey key, string algorithm) =>
         key.CryptoProviderFactory
-            .CreateForSigning(key, SecurityAlgorithms.RsaSha256)
-            .Sign(Encoding.UTF8.GetBytes("payload"));
+            .CreateForSigning(key, algorithm)
+            .Sign("payload"u8.ToArray());
 
     /// <summary>The proposed change to JsonWebKey.CreateRsaParameters.</summary>
     private static RSAParameters CreatePaddedRsaParameters(JsonWebKey jwk)

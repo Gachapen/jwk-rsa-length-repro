@@ -19,6 +19,9 @@ jobs:
       - name: Deterministic fixture with released IdentityModel
         if: success() || failure()
         run: dotnet run --project Repro -c Release --no-build -- fixture
+      - name: Minimal example from the issue (1024-bit JWK, PS256)
+        if: success() || failure()
+        run: dotnet run --project Repro -c Release --no-build -- snippet
       - name: Random keys with released IdentityModel
         if: success() || failure()
         run: dotnet run --project Repro -c Release --no-build -- released

@@ -23,6 +23,7 @@ A few percent of freshly generated RSA keys are affected (the exact share depend
 | `released` | Generates 1000 `RSA.Create(2048)` keys, serializes each as a spec-compliant JWK (leading zero bytes stripped), loads it with `new JsonWebKey(json)` and signs via `jwk.CryptoProviderFactory.CreateForSigning(jwk, RS256)`. | fails for the keys with a short value → exit 1 | passes → exit 0 |
 | `padded` | Same kind of keys, but builds `RSAParameters` with the proposed padding (`D` → `n.Length`, the rest → `(n.Length + 1) / 2`) and signs through `RsaSecurityKey`. Simulates the fix. | passes | passes |
 | `fixture` | Loads [`fixtures/short-d.jwk.json`](fixtures/short-d.jwk.json) through `JsonWebKey` and signs. Deterministic version of `released`. | fails | passes |
+| `snippet` | Signs with the small 1024-bit JWK from the issue's minimal example (`d` is 127 bytes), using PS256 because IdentityModel's minimum signing key size is 2048 bits for RS256 but 528 bits for PS256. | fails | passes |
 | `find-fixture` | Generates keys until `d` is shorter than `n` and writes it to `fixtures/`. | – | – |
 
 Each mode prints the OS, runtime and IdentityModel version, the full exception chain for failures, and a breakdown
