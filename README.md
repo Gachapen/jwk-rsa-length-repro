@@ -20,13 +20,17 @@ A few percent of freshly generated RSA keys are affected (the exact share depend
 
 | Mode | What it does | Windows | Linux / macOS |
 |---|---|---|---|
-| `released [count]` | Generates `count` (default 1000) `RSA.Create(2048)` keys, serializes each as a spec-compliant JWK (leading zero bytes stripped), loads it with `new JsonWebKey(json)` and signs via `jwk.CryptoProviderFactory.CreateForSigning(jwk, RS256)`. | fails for the keys with a short value → exit 1 | passes → exit 0 |
-| `padded [count]` | Same kind of keys, but builds `RSAParameters` with the proposed padding (`D` → `n.Length`, the rest → `(n.Length + 1) / 2`) and signs through `RsaSecurityKey`. Simulates the fix. | passes | passes |
-| `fixture [path]` | Loads [`fixtures/short-d.jwk.json`](fixtures/short-d.jwk.json) through `JsonWebKey` and signs. Deterministic version of `released`. | fails | passes |
+| `released` | Generates 1000 `RSA.Create(2048)` keys, serializes each as a spec-compliant JWK (leading zero bytes stripped), loads it with `new JsonWebKey(json)` and signs via `jwk.CryptoProviderFactory.CreateForSigning(jwk, RS256)`. | fails for the keys with a short value → exit 1 | passes → exit 0 |
+| `padded` | Same kind of keys, but builds `RSAParameters` with the proposed padding (`D` → `n.Length`, the rest → `(n.Length + 1) / 2`) and signs through `RsaSecurityKey`. Simulates the fix. | passes | passes |
+| `fixture` | Loads [`fixtures/short-d.jwk.json`](fixtures/short-d.jwk.json) through `JsonWebKey` and signs. Deterministic version of `released`. | fails | passes |
 | `find-fixture` | Generates keys until `d` is shorter than `n` and writes it to `fixtures/`. | – | – |
 
 Each mode prints the OS, runtime and IdentityModel version, the full exception chain for failures, and a breakdown
-of which parameter was short. Every signature is verified with the public key independently of IdentityModel.
+of which parameter was short.
+
+Signing is the shortest public path to the failure: `CreateRsaParameters` is internal, and IdentityModel only builds
+the `RSA` instance (calling `CreateRsaParameters` and `RSA.ImportParameters`) on the first `Sign`, not in
+`CreateForSigning`.
 
 > The fixture is a throwaway key generated only for this repro. It is not used anywhere.
 

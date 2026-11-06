@@ -9,67 +9,43 @@ namespace Repro;
 
 internal static class Program
 {
-    private const int DefaultKeyCount = 1000;
+    private const int KeyCount = 1000;
     private const int MaxPrintedFailures = 3;
     private const string FixtureFileName = "short-d.jwk.json";
 
     private static readonly string[] s_privateNames = ["d", "p", "q", "dp", "dq", "qi"];
-    private static readonly byte[] s_payload = Encoding.UTF8.GetBytes("identitymodel-rsa-jwk-padding-repro");
 
     public static int Main(string[] args)
     {
         var mode = args.Length > 0 ? args[0] : "released";
-        PrintEnvironment(mode);
 
-        return mode switch
-        {
-            "released" => RunRandomKeys(ParseCount(args), padded: false),
-            "padded" => RunRandomKeys(ParseCount(args), padded: true),
-            "fixture" => RunFixture(args.Length > 1 ? args[1] : null),
-            "find-fixture" => FindFixture(),
-            _ => Usage(),
-        };
-    }
-
-    private static int Usage()
-    {
-        Console.Error.WriteLine("Usage: Repro <released [count] | padded [count] | fixture [path] | find-fixture>");
-        return 64;
-    }
-
-    private static int ParseCount(string[] args)
-    {
-        if (args.Length > 1 && int.TryParse(args[1], out var count) && count > 0)
-        {
-            return count;
-        }
-
-        return DefaultKeyCount;
-    }
-
-    private static void PrintEnvironment(string mode)
-    {
         var identityModelVersion = typeof(JsonWebKey).Assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
-
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         Console.WriteLine($"Mode:          {mode}");
         Console.WriteLine($"OS:            {RuntimeInformation.OSDescription} ({RuntimeInformation.OSArchitecture})");
         Console.WriteLine($"Runtime:       {RuntimeInformation.FrameworkDescription}");
         Console.WriteLine($"IdentityModel: Microsoft.IdentityModel.Tokens {identityModelVersion}");
         Console.WriteLine();
+
+        return mode switch
+        {
+            "released" => RunRandomKeys(padded: false),
+            "padded" => RunRandomKeys(padded: true),
+            "fixture" => RunFixture(),
+            "find-fixture" => FindFixture(),
+            _ => throw new ArgumentException("Usage: Repro <released | padded | fixture | find-fixture>"),
+        };
     }
 
-    // Modes
-
     /// <summary>
-    /// released: sign through JsonWebKey (IdentityModel's CreateRsaParameters, unchanged).
-    /// padded:   same kind of JWKs, but build RSAParameters with the proposed padding and sign through RsaSecurityKey.
+    /// released: sign with the JsonWebKey as is (IdentityModel's CreateRsaParameters, unchanged).
+    /// padded:   pad the values as proposed and sign with an RsaSecurityKey (simulates the fix).
     /// </summary>
-    private static int RunRandomKeys(int count, bool padded)
+    private static int RunRandomKeys(bool padded)
     {
         Console.WriteLine(padded
-            ? $"Signing with {count} random RSA-2048 JWKs, RSAParameters padded as proposed (simulated fix)."
-            : $"Signing with {count} random RSA-2048 JWKs through JsonWebKey (released IdentityModel).");
+            ? $"Signing with {KeyCount} random RSA-2048 JWKs, RSAParameters padded as proposed (simulated fix)."
+            : $"Signing with {KeyCount} random RSA-2048 JWKs through JsonWebKey (released IdentityModel).");
         Console.WriteLine();
 
         var shortCounts = s_privateNames.ToDictionary(name => name, _ => 0);
@@ -77,10 +53,12 @@ internal static class Program
         var failures = 0;
         var failuresOnShortKeys = 0;
 
-        for (var i = 0; i < count; i++)
+        for (var i = 0; i < KeyCount; i++)
         {
-            var json = CreateRandomJwkJson(kid: $"key-{i}");
-            var shortNames = ShortValues(json);
+            using var rsa = RSA.Create(2048);
+            var jwk = new JsonWebKey(ToMinimalJwkJson(rsa.ExportParameters(includePrivateParameters: true), kid: $"key-{i}"));
+
+            var shortNames = ShortValues(jwk);
             foreach (var name in shortNames)
             {
                 shortCounts[name]++;
@@ -93,14 +71,7 @@ internal static class Program
 
             try
             {
-                if (padded)
-                {
-                    SignWithPaddedRsaSecurityKey(json);
-                }
-                else
-                {
-                    SignWithJsonWebKey(json);
-                }
+                Sign(padded ? new RsaSecurityKey(CreatePaddedRsaParameters(jwk)) { KeyId = jwk.Kid } : jwk);
             }
             catch (Exception ex)
             {
@@ -126,14 +97,14 @@ internal static class Program
         }
 
         Console.WriteLine("Summary");
-        Console.WriteLine($"  Keys:                          {count}");
-        Console.WriteLine($"  Keys with a short value:       {keysWithShortValue} ({Percent(keysWithShortValue, count)})");
+        Console.WriteLine($"  Keys:                          {KeyCount}");
+        Console.WriteLine($"  Keys with a short value:       {keysWithShortValue} ({Percent(keysWithShortValue)})");
         foreach (var name in s_privateNames)
         {
             Console.WriteLine($"    {name,-3} shorter than required:  {shortCounts[name]}");
         }
 
-        Console.WriteLine($"  Signing failures:              {failures} ({Percent(failures, count)})");
+        Console.WriteLine($"  Signing failures:              {failures} ({Percent(failures)})");
         Console.WriteLine($"    of which on keys with a short value: {failuresOnShortKeys}");
         Console.WriteLine();
         Console.WriteLine(failures == 0 ? "RESULT: PASS (all keys signed)" : "RESULT: FAIL");
@@ -141,28 +112,20 @@ internal static class Program
         return failures == 0 ? 0 : 1;
     }
 
-    private static int RunFixture(string? path)
+    private static int RunFixture()
     {
-        path ??= Path.Combine(GetFixturesDirectory(), FixtureFileName);
+        var path = Path.Combine(GetFixturesDirectory(), FixtureFileName);
+        Console.WriteLine($"Loading {Path.GetFullPath(path)} through JsonWebKey and signing (released IdentityModel).");
 
-        Console.WriteLine($"Loading fixture {Path.GetFullPath(path)} through JsonWebKey and signing (released IdentityModel).");
-        var json = File.ReadAllText(path);
-
-        var shortNames = ShortValues(json);
-        Console.WriteLine($"Short values in fixture: {Describe(shortNames)}");
-        PrintLengths(json);
+        var jwk = new JsonWebKey(File.ReadAllText(path));
+        Console.WriteLine($"Short values: {Describe(ShortValues(jwk))}");
+        PrintLengths(jwk);
         Console.WriteLine();
-
-        if (!shortNames.Contains("d"))
-        {
-            Console.WriteLine("RESULT: INVALID FIXTURE (d is not shorter than n; regenerate with 'find-fixture')");
-            return 2;
-        }
 
         try
         {
-            SignWithJsonWebKey(json);
-            Console.WriteLine("RESULT: PASS (signature created and verified)");
+            Sign(jwk);
+            Console.WriteLine("RESULT: PASS (signed)");
             return 0;
         }
         catch (Exception ex)
@@ -177,8 +140,6 @@ internal static class Program
 
     private static int FindFixture()
     {
-        var directory = GetFixturesDirectory();
-
         for (var attempt = 1; ; attempt++)
         {
             using var rsa = RSA.Create(2048);
@@ -189,47 +150,26 @@ internal static class Program
             }
 
             var json = ToMinimalJwkJson(parameters, kid: "short-d-repro-fixture", indented: true);
-            var path = Path.Combine(directory, FixtureFileName);
+            var path = Path.Combine(GetFixturesDirectory(), FixtureFileName);
             File.WriteAllText(path, json + "\n");
 
+            var jwk = new JsonWebKey(json);
             Console.WriteLine($"Found a key with short d after {attempt} attempt(s).");
-            Console.WriteLine($"Short values: {Describe(ShortValues(json))}");
-            PrintLengths(json);
+            Console.WriteLine($"Short values: {Describe(ShortValues(jwk))}");
+            PrintLengths(jwk);
             Console.WriteLine($"Wrote {Path.GetFullPath(path)}");
             return 0;
         }
     }
 
-    // Signing
-
-    /// <summary>The code path used by applications: JsonWebKey -> CryptoProviderFactory -> CreateRsaParameters.</summary>
-    private static void SignWithJsonWebKey(string json)
-    {
-        var jwk = new JsonWebKey(json);
-        SignAndVerify(jwk, json);
-    }
-
-    /// <summary>Simulates the proposed fix: pad the decoded values before handing them to RSAParameters.</summary>
-    private static void SignWithPaddedRsaSecurityKey(string json)
-    {
-        var jwk = new JsonWebKey(json);
-        var key = new RsaSecurityKey(CreatePaddedRsaParameters(jwk)) { KeyId = jwk.Kid };
-        SignAndVerify(key, json);
-    }
-
-    private static void SignAndVerify(SecurityKey key, string json)
-    {
-        var factory = key.CryptoProviderFactory;
-        var provider = factory.CreateForSigning(key, SecurityAlgorithms.RsaSha256);
-        try
-        {
-            Verify(json, provider.Sign(s_payload));
-        }
-        finally
-        {
-            factory.ReleaseSignatureProvider(provider);
-        }
-    }
+    /// <summary>
+    /// The application code path. IdentityModel creates the RSA instance (and, for a JsonWebKey, calls
+    /// CreateRsaParameters and RSA.ImportParameters) lazily on the first Sign, not in CreateForSigning.
+    /// </summary>
+    private static void Sign(SecurityKey key) =>
+        key.CryptoProviderFactory
+            .CreateForSigning(key, SecurityAlgorithms.RsaSha256)
+            .Sign(Encoding.UTF8.GetBytes("payload"));
 
     /// <summary>The proposed change to JsonWebKey.CreateRsaParameters.</summary>
     private static RSAParameters CreatePaddedRsaParameters(JsonWebKey jwk)
@@ -262,49 +202,27 @@ internal static class Program
         return padded;
     }
 
-    /// <summary>Verifies independently of IdentityModel, using only the public key.</summary>
-    private static void Verify(string json, byte[] signature)
-    {
-        var jwk = new JsonWebKey(json);
-        using var rsa = RSA.Create(new RSAParameters { Modulus = Decode(jwk.N), Exponent = Decode(jwk.E) });
-        if (!rsa.VerifyData(s_payload, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
-        {
-            throw new CryptographicException("Signature was created but does not verify.");
-        }
-    }
-
-    // JWK helpers
-
-    private static string CreateRandomJwkJson(string kid)
-    {
-        using var rsa = RSA.Create(2048);
-        return ToMinimalJwkJson(rsa.ExportParameters(includePrivateParameters: true), kid);
-    }
-
     /// <summary>
     /// Serializes as RFC 7518 requires: every value is a Base64urlUInt using the minimum number of octets,
     /// i.e. leading zero bytes are stripped.
     /// </summary>
     private static string ToMinimalJwkJson(RSAParameters parameters, string kid, bool indented = false)
     {
-        using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = indented }))
+        var jwk = new
         {
-            writer.WriteStartObject();
-            writer.WriteString("kty", "RSA");
-            writer.WriteString("kid", kid);
-            writer.WriteString("n", EncodeMinimal(parameters.Modulus!));
-            writer.WriteString("e", EncodeMinimal(parameters.Exponent!));
-            writer.WriteString("d", EncodeMinimal(parameters.D!));
-            writer.WriteString("p", EncodeMinimal(parameters.P!));
-            writer.WriteString("q", EncodeMinimal(parameters.Q!));
-            writer.WriteString("dp", EncodeMinimal(parameters.DP!));
-            writer.WriteString("dq", EncodeMinimal(parameters.DQ!));
-            writer.WriteString("qi", EncodeMinimal(parameters.InverseQ!));
-            writer.WriteEndObject();
-        }
+            kty = "RSA",
+            kid,
+            n = EncodeMinimal(parameters.Modulus!),
+            e = EncodeMinimal(parameters.Exponent!),
+            d = EncodeMinimal(parameters.D!),
+            p = EncodeMinimal(parameters.P!),
+            q = EncodeMinimal(parameters.Q!),
+            dp = EncodeMinimal(parameters.DP!),
+            dq = EncodeMinimal(parameters.DQ!),
+            qi = EncodeMinimal(parameters.InverseQ!),
+        };
 
-        return Encoding.UTF8.GetString(stream.ToArray());
+        return JsonSerializer.Serialize(jwk, new JsonSerializerOptions { WriteIndented = indented });
     }
 
     private static string EncodeMinimal(byte[] value)
@@ -320,42 +238,40 @@ internal static class Program
 
     private static byte[] Decode(string value) => Base64UrlEncoder.DecodeBytes(value);
 
-    private static Dictionary<string, int> DecodedLengths(string json)
+    private static Dictionary<string, int> PrivateValueLengths(JsonWebKey jwk) => new()
     {
-        using var document = JsonDocument.Parse(json);
-        var lengths = new Dictionary<string, int>();
-        foreach (var name in s_privateNames.Prepend("n"))
-        {
-            lengths[name] = Decode(document.RootElement.GetProperty(name).GetString()!).Length;
-        }
+        ["d"] = Decode(jwk.D).Length,
+        ["p"] = Decode(jwk.P).Length,
+        ["q"] = Decode(jwk.Q).Length,
+        ["dp"] = Decode(jwk.DP).Length,
+        ["dq"] = Decode(jwk.DQ).Length,
+        ["qi"] = Decode(jwk.QI).Length,
+    };
 
-        return lengths;
+    /// <summary>The length RSAParameters requires: D as long as Modulus, the rest half of that (rounded up).</summary>
+    private static int RequiredLength(string name, JsonWebKey jwk)
+    {
+        var modulusLength = Decode(jwk.N).Length;
+        return name == "d" ? modulusLength : (modulusLength + 1) / 2;
     }
-
-    private static int RequiredLength(string name, int modulusLength) =>
-        name == "d" ? modulusLength : (modulusLength + 1) / 2;
 
     /// <summary>Returns the private values that decode to fewer bytes than RSAParameters requires.</summary>
-    private static List<string> ShortValues(string json)
+    private static List<string> ShortValues(JsonWebKey jwk)
     {
-        var lengths = DecodedLengths(json);
-        var modulusLength = lengths["n"];
-        return s_privateNames.Where(name => lengths[name] < RequiredLength(name, modulusLength)).ToList();
+        var lengths = PrivateValueLengths(jwk);
+        return s_privateNames.Where(name => lengths[name] < RequiredLength(name, jwk)).ToList();
     }
 
-    private static void PrintLengths(string json)
+    private static void PrintLengths(JsonWebKey jwk)
     {
-        var lengths = DecodedLengths(json);
-        var modulusLength = lengths["n"];
+        var lengths = PrivateValueLengths(jwk);
         Console.WriteLine("Decoded lengths (actual / required by RSAParameters):");
-        Console.WriteLine($"  n   {modulusLength,3}");
+        Console.WriteLine($"  n   {Decode(jwk.N).Length,3}");
         foreach (var name in s_privateNames)
         {
-            Console.WriteLine($"  {name,-3} {lengths[name],3} / {RequiredLength(name, modulusLength)}");
+            Console.WriteLine($"  {name,-3} {lengths[name],3} / {RequiredLength(name, jwk)}");
         }
     }
-
-    // Output helpers
 
     private static void PrintExceptionChain(Exception exception)
     {
@@ -371,19 +287,17 @@ internal static class Program
 
     private static string Describe(List<string> names) => names.Count == 0 ? "none" : string.Join(", ", names);
 
-    private static string Percent(int part, int total) => $"{100.0 * part / total:0.0}%";
+    private static string Percent(int count) => $"{100.0 * count / KeyCount:0.0}%";
 
+    /// <summary>Finds fixtures/ whether run from the repository root (CI) or from Repro/ (locally).</summary>
     private static string GetFixturesDirectory()
     {
-        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        for (var directory = new DirectoryInfo(Directory.GetCurrentDirectory()); directory is not null; directory = directory.Parent)
         {
-            for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
+            var candidate = Path.Combine(directory.FullName, "fixtures");
+            if (Directory.Exists(candidate))
             {
-                var candidate = Path.Combine(directory.FullName, "fixtures");
-                if (Directory.Exists(candidate))
-                {
-                    return candidate;
-                }
+                return candidate;
             }
         }
 
