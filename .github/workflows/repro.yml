@@ -1,0 +1,24 @@
+name: repro
+on: [push, workflow_dispatch]
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        run: dotnet build Repro -c Release
+      - name: Proposed fix (padded RSAParameters)
+        run: dotnet run --project Repro -c Release --no-build -- padded
+      - name: Deterministic fixture with released IdentityModel
+        if: success() || failure()
+        run: dotnet run --project Repro -c Release --no-build -- fixture
+      - name: Random keys with released IdentityModel
+        if: success() || failure()
+        run: dotnet run --project Repro -c Release --no-build -- released
